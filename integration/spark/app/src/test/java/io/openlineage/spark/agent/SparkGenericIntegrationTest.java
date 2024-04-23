@@ -17,8 +17,12 @@ import io.openlineage.spark.agent.lifecycle.UnknownEntryFacetListener;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+
+import io.openlineage.spark.agent.util.SparkListenerType;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.spark.SparkConf;
+import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -33,6 +37,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockserver.integration.ClientAndServer;
 
 /**
@@ -47,7 +53,6 @@ class SparkGenericIntegrationTest {
   private static final String LOCAL_IP = "127.0.0.1";
 
   private static final int MOCK_SERVER_PORT = 1083;
-  private static SparkSession spark;
   private static ClientAndServer mockServer;
 
   @BeforeAll
@@ -64,12 +69,10 @@ class SparkGenericIntegrationTest {
     MockServerUtils.stopMockServer(mockServer);
   }
 
-  @BeforeEach
   @SneakyThrows
-  public void beforeEach() {
+  private SparkSession initSession(SparkListenerType listenerType) {
     MockServerUtils.clearRequests(mockServer);
-    spark =
-        SparkSession.builder()
+    SparkSession.Builder builder = SparkSession.builder()
             .master("local[*]")
             .appName("GenericIntegrationTest")
             .config("spark.driver.host", LOCAL_IP)
@@ -77,8 +80,8 @@ class SparkGenericIntegrationTest {
             .config("spark.sql.shuffle.partitions", 1)
             .config("spark.openlineage.transport.type", "http")
             .config(
-                "spark.openlineage.transport.url",
-                "http://localhost:" + mockServer.getPort() + "/api/v1/lineage")
+                    "spark.openlineage.transport.url",
+                    "http://localhost:" + mockServer.getPort() + "/api/v1/lineage")
             .config("spark.openlineage.facets.disabled", "spark_unknown;spark.logicalPlan")
             .config("spark.openlineage.debugFacet", "enabled")
             .config("spark.openlineage.namespace", "generic-namespace")
@@ -87,15 +90,21 @@ class SparkGenericIntegrationTest {
             .config("spark.openlineage.parentJobNamespace", "parent-namespace")
             .config("spark.openlineage.job.owners.team", "MyTeam")
             .config("spark.openlineage.job.owners.person", "John Smith")
-            .config("spark.openlineage.parentJobNamespace", "parent-namespace")
-            .config("spark.extraListeners", OpenLineageSparkListener.class.getName())
-            .getOrCreate();
+            .config("spark.openlineage.parentJobNamespace", "parent-namespace");
+    switch (listenerType) {
+      case ASYNC:
+        builder.config("spark.extraListeners", OpenLineageSparkAsyncListener.class.getName()).getOrCreate();
+      default:
+        builder.config("spark.extraListeners", OpenLineageSparkListener.class.getName()).getOrCreate();
+    }
+    return builder.getOrCreate();
   }
 
-  @Test
-  void sparkEmitsEventsWithFacets() {
-    Dataset<Row> df = createTempDataset();
-
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void sparkEmitsApplicationLevelEvents(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    Dataset<Row> df = createTempDataset(spark);
     Dataset<Row> agg = df.groupBy("a").count();
     agg.write().mode("overwrite").csv("/tmp/test_data/test_output/");
     spark.stop();
@@ -187,12 +196,13 @@ class SparkGenericIntegrationTest {
             });
   }
 
-  @Test
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
   @SneakyThrows
   @SuppressWarnings("PMD.JUnitTestsShouldIncludeAssert")
-  void sparkEmitsDebugFacet() {
-    Dataset<Row> df = createTempDataset();
-
+  void sparkGathersMetrics(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    Dataset<Row> df = createTempDataset(spark);
     Dataset<Row> agg = df.groupBy("a").count();
     agg.write().mode("overwrite").csv("/tmp/test_data/test_output/");
     spark.stop();
@@ -225,12 +235,13 @@ class SparkGenericIntegrationTest {
             });
   }
 
-  @Test
-  void sparkEmitsJobOwnershipFacet() {
-    Dataset<Row> df = createTempDataset();
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void sparkEmitsJobOwnershipFacet(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    Dataset<Row> df = createTempDataset(spark);
     Dataset<Row> agg = df.groupBy("a").count();
     agg.write().mode("overwrite").csv("/tmp/test_data/test_output/");
-
     spark.stop();
     verifyEvents(mockServer, "applicationLevelStartJob.json");
 
@@ -253,7 +264,7 @@ class SparkGenericIntegrationTest {
             .isPresent());
   }
 
-  private Dataset<Row> createTempDataset() {
+  private Dataset<Row> createTempDataset(SparkSession spark) {
     return spark
         .createDataFrame(
             ImmutableList.of(RowFactory.create(1L, 2L), RowFactory.create(3L, 4L)),

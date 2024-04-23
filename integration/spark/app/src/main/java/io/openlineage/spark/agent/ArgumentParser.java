@@ -51,6 +51,11 @@ public class ArgumentParser {
       "spark.openlineage.jobName.appendDatasetName";
   public static final String SPARK_CONF_JOB_NAME_REPLACE_DOT_WITH_UNDERSCORE =
       "spark.openlineage.jobName.replaceDotWithUnderscore";
+  public static final String SPARK_CONF_ASYNC_THREADCOUNT = "spark.openlineage.async.threads";
+  public static final String SPARK_CONF_ASYNC_QUEUESIZE = "spark.openlineage.async.queueSize";
+  public static final String SPARK_CONF_ASYNC_TIMEOUT = "spark.openlineage.async.timeout";
+  public static final String SPARK_CONF_ASYNC_SHUTDOWN_WAIT =
+      "spark.openlineage.async.shutdownWait";
   private static final String SPARK_CONF_FACETS_DISABLED = "spark.openlineage.facets.disabled";
 
   private static final String SPARK_CONF_DEBUG_FACET = "spark.openlineage.debugFacet";

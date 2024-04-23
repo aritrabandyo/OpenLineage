@@ -8,6 +8,7 @@ package io.openlineage.spark.agent;
 import static io.openlineage.spark.agent.MockServerUtils.getEventsEmittedWithJobName;
 import static io.openlineage.spark.agent.MockServerUtils.verifyEvents;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.InstanceOfAssertFactories.list;
 import static org.mockserver.model.HttpRequest.request;
 
 import com.google.common.collect.ImmutableList;
@@ -20,6 +21,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import io.openlineage.spark.agent.util.SparkListenerType;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.io.FileUtils;
@@ -37,6 +40,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.model.HttpRequest;
 
@@ -65,6 +70,37 @@ class SparkIcebergIntegrationTest {
   public static void afterAll() {
     SparkSession$.MODULE$.cleanupAnyExistingSession();
     MockServerUtils.stopMockServer(mockServer);
+  }
+
+  @SneakyThrows
+  private SparkSession initSession(SparkListenerType listenerType) {
+    MockServerUtils.clearRequests(mockServer);
+    SparkSession.Builder builder = SparkSession.builder()
+            .master("local[*]")
+            .appName("GenericIntegrationTest")
+            .config("spark.driver.host", LOCAL_IP)
+            .config("spark.driver.bindAddress", LOCAL_IP)
+            .config("spark.sql.shuffle.partitions", 1)
+            .config("spark.openlineage.transport.type", "http")
+            .config(
+                    "spark.openlineage.transport.url",
+                    "http://localhost:" + mockServer.getPort() + "/api/v1/lineage")
+            .config("spark.openlineage.facets.disabled", "spark_unknown;spark.logicalPlan")
+            .config("spark.openlineage.debugFacet", "enabled")
+            .config("spark.openlineage.namespace", "generic-namespace")
+            .config("spark.openlineage.parentJobName", "parent-job")
+            .config("spark.openlineage.parentRunId", "bd9c2467-3ed7-4fdc-85c2-41ebf5c73b40")
+            .config("spark.openlineage.parentJobNamespace", "parent-namespace")
+            .config("spark.openlineage.job.owners.team", "MyTeam")
+            .config("spark.openlineage.job.owners.person", "John Smith")
+            .config("spark.openlineage.parentJobNamespace", "parent-namespace");
+    switch (listenerType) {
+      case ASYNC:
+        builder.config("spark.extraListeners", OpenLineageSparkAsyncListener.class.getName()).getOrCreate();
+      default:
+        builder.config("spark.extraListeners", OpenLineageSparkListener.class.getName()).getOrCreate();
+    }
+    return builder.getOrCreate();
   }
 
   @BeforeEach
@@ -101,9 +137,11 @@ class SparkIcebergIntegrationTest {
             .getOrCreate();
   }
 
-  @Test
-  void testAlterTable() {
-    clearTables("alter_table_test");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testAlterTable(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark, "alter_table_test");
     spark.sql("CREATE TABLE alter_table_test (a string, b string) USING iceberg");
     spark.sql("INSERT INTO alter_table_test VALUES ('a', 'b')");
     spark.sql("ALTER TABLE alter_table_test RENAME COLUMN b TO c");
@@ -112,16 +150,20 @@ class SparkIcebergIntegrationTest {
         mockServer, "pysparkV2AlterTableStartEvent.json", "pysparkV2AlterTableCompleteEvent.json");
   }
 
-  @Test
-  void testWriteTableVersion() {
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testWriteTableVersion(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
     spark.sql("CREATE TABLE table (a int, b int) USING iceberg");
     spark.sql("INSERT INTO table VALUES (1, 2)");
 
     verifyEvents(mockServer, "pysparkWriteIcebergTableVersionEnd.json");
   }
 
-  @Test
-  void testCreateTable() {
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testCreateTable(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
     spark.sql("CREATE TABLE create_table_test (a string, b string) USING iceberg");
 
     verifyEvents(
@@ -130,10 +172,12 @@ class SparkIcebergIntegrationTest {
         "pysparkV2CreateTableCompleteEvent.json");
   }
 
-  @Test
-  void testCreateTableAsSelect() {
-    clearTables("temp", "source1", "source2", "target");
-    createTempDataset().createOrReplaceTempView("temp");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testCreateTableAsSelect(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark, "temp", "source1", "source2", "target");
+    createTempDataset(spark).createOrReplaceTempView("temp");
 
     spark.sql("CREATE TABLE source1 USING iceberg AS SELECT * FROM temp");
     spark.sql("CREATE TABLE source2 USING iceberg AS SELECT * FROM temp");
@@ -146,10 +190,12 @@ class SparkIcebergIntegrationTest {
         "pysparkV2CreateTableAsSelectCompleteEvent.json");
   }
 
-  @Test
-  void testOverwriteByExpression() {
-    clearTables("tbl", "temp");
-    createTempDataset().createOrReplaceTempView("temp");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testOverwriteByExpression(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark, "tbl", "temp");
+    createTempDataset(spark).createOrReplaceTempView("temp");
 
     spark.sql("CREATE TABLE tbl USING iceberg AS SELECT * FROM temp");
     spark.sql("INSERT OVERWRITE tbl VALUES (5,6),(7,8)");
@@ -160,9 +206,11 @@ class SparkIcebergIntegrationTest {
         "pysparkV2OverwriteByExpressionCompleteEvent.json");
   }
 
-  @Test
-  void testOverwriteByPartition() {
-    clearTables("tbl", "temp", "source");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testOverwriteByPartition(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark, "tbl", "temp", "source");
     Dataset<Row> dataset =
         spark
             .createDataFrame(
@@ -188,10 +236,12 @@ class SparkIcebergIntegrationTest {
         "pysparkV2OverwritePartitionsCompleteEvent.json");
   }
 
-  @Test
-  void testReplaceTable() {
-    clearTables("tbl_replace", "temp");
-    createTempDataset().createOrReplaceTempView("temp");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testReplaceTable(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark, "tbl_replace", "temp");
+    createTempDataset(spark).createOrReplaceTempView("temp");
 
     spark.sql("CREATE TABLE tbl_replace USING iceberg");
     spark.sql("REPLACE TABLE tbl_replace USING iceberg AS SELECT * FROM temp");
@@ -202,10 +252,12 @@ class SparkIcebergIntegrationTest {
         "pysparkV2ReplaceTableAsSelectCompleteEvent.json");
   }
 
-  @Test
-  void testDelete() {
-    clearTables("tbl_delete", "temp");
-    createTempDataset().createOrReplaceTempView("temp");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testDelete(SparkListenerType listenerType) {
+    SparkSession session = initSession(listenerType);
+    clearTables(spark, "tbl_delete", "temp");
+    createTempDataset(spark).createOrReplaceTempView("temp");
 
     spark.sql("CREATE TABLE tbl_delete USING iceberg AS SELECT * FROM temp");
     spark.sql("DELETE FROM tbl_delete WHERE a=1");
@@ -213,10 +265,12 @@ class SparkIcebergIntegrationTest {
     verifyEvents(mockServer, "pysparkV2DeleteStartEvent.json", "pysparkV2DeleteCompleteEvent.json");
   }
 
-  @Test
-  void testUpdate() {
-    clearTables("tbl_update", "temp");
-    createTempDataset().createOrReplaceTempView("temp");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testUpdate(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark,"tbl_update", "temp");
+    createTempDataset(spark).createOrReplaceTempView("temp");
 
     spark.sql("CREATE TABLE tbl_update USING iceberg AS SELECT * FROM temp");
     spark.sql("UPDATE tbl_update SET b=5 WHERE a=1");
@@ -224,9 +278,11 @@ class SparkIcebergIntegrationTest {
     verifyEvents(mockServer, "pysparkV2UpdateStartEvent.json", "pysparkV2UpdateCompleteEvent.json");
   }
 
-  @Test
-  void testMergeInto() {
-    clearTables("events", "updates");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testMergeInto(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark, "events", "updates");
     spark.sql("CREATE TABLE events (event_id long, last_updated_at long) USING iceberg");
     spark.sql("CREATE TABLE updates (event_id long, updated_at long) USING iceberg");
 
@@ -247,14 +303,16 @@ class SparkIcebergIntegrationTest {
         "pysparkV2MergeIntoTableCompleteEvent.json");
   }
 
-  @Test
-  void testDrop() throws InterruptedException {
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testDrop(SparkListenerType listenerType) throws InterruptedException {
+    SparkSession spark = initSession(listenerType);
     if (System.getProperty("spark.version").matches("3.4.*")) {
       // for Spark 3.4 & Iceberg - dropping directly after creation is not working
       return;
     }
     String tableName = "iceberg_drop_table_test";
-    clearTables(tableName);
+    clearTables(spark, tableName);
     spark.sql(String.format("CREATE TABLE %s (a string, b string) USING iceberg", tableName));
     spark.sql(String.format("INSERT INTO %s VALUES ('a', 'b')", tableName));
     Thread.sleep(1000);
@@ -264,10 +322,12 @@ class SparkIcebergIntegrationTest {
         mockServer, "pysparkV2DropTableStartEvent.json", "pysparkV2DropTableCompleteEvent.json");
   }
 
-  @Test
-  void testAppend() {
-    clearTables("append_source1", "append_source2", "append_table");
-    createTempDataset().createOrReplaceTempView("temp");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testAppend(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+    clearTables(spark, "append_source1", "append_source2", "append_table");
+    createTempDataset(spark).createOrReplaceTempView("temp");
 
     spark.sql("CREATE TABLE append_source1 USING iceberg AS SELECT a FROM temp");
     spark.sql("CREATE TABLE append_source2 USING iceberg AS SELECT a FROM temp");
@@ -281,10 +341,13 @@ class SparkIcebergIntegrationTest {
         mockServer, "pysparkV2AppendDataStartEvent.json", "pysparkV2AppendDataCompleteEvent.json");
   }
 
-  @Test
-  void testRemovePathPattern() throws InterruptedException {
-    clearTables("tbl_remove_path_666", "temp", "input_table_666");
-    createTempDataset().createOrReplaceTempView("temp");
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
+  void testRemovePathPattern(SparkListenerType listenerType) throws InterruptedException {
+    SparkSession spark = initSession(listenerType);
+
+    clearTables(spark,"tbl_remove_path_666", "temp", "input_table_666");
+    createTempDataset(spark).createOrReplaceTempView("temp");
 
     spark.sql("CREATE TABLE input_table_666 USING iceberg AS SELECT * FROM temp");
     spark.sql("CREATE TABLE tbl_remove_path_666 USING iceberg AS SELECT a FROM input_table_666");
@@ -304,11 +367,14 @@ class SparkIcebergIntegrationTest {
         .isNotEmpty();
   }
 
-  @Test
+  @ParameterizedTest
+  @EnumSource(SparkListenerType.class)
   @SuppressWarnings("PMD.JUnitTestContainsTooManyAsserts")
-  void testDebugFacet() {
-    clearTables("iceberg_temp", "temp");
-    createTempDataset().createOrReplaceTempView("temp");
+  void testDebugFacet(SparkListenerType listenerType) {
+    SparkSession spark = initSession(listenerType);
+
+    clearTables(spark, "iceberg_temp", "temp");
+    createTempDataset(spark).createOrReplaceTempView("temp");
     spark.sql("CREATE TABLE iceberg_temp USING iceberg AS SELECT * FROM temp");
 
     HttpRequest[] httpRequests =
@@ -372,7 +438,7 @@ class SparkIcebergIntegrationTest {
         .containsKeys("type", "url", "endpoint");
   }
 
-  private Dataset<Row> createTempDataset() {
+  private Dataset<Row> createTempDataset(SparkSession spark) {
     return spark
         .createDataFrame(
             ImmutableList.of(RowFactory.create(1L, 2L), RowFactory.create(3L, 4L)),
@@ -384,7 +450,7 @@ class SparkIcebergIntegrationTest {
         .repartition(1);
   }
 
-  private void clearTables(String... tables) {
+  private void clearTables(SparkSession spark, String... tables) {
     Arrays.asList(tables).stream()
         .filter(t -> spark.catalog().tableExists(t))
         .forEach(t -> spark.sql("DROP TABLE IF EXISTS " + t));
