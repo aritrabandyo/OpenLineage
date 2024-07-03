@@ -61,7 +61,7 @@ public class OpenLineageSparkListener extends org.apache.spark.scheduler.SparkLi
       Collections.synchronizedMap(new HashMap<>());
   private static final Map<Integer, ExecutionContext> rddExecutionRegistry =
       Collections.synchronizedMap(new HashMap<>());
-  private static WeakHashMap<RDD<?>, Configuration> outputs = new WeakHashMap<>();
+  private static Map<RDD<?>, Configuration> outputs = Collections.synchronizedMap(new WeakHashMap<>());
   private static ContextFactory contextFactory;
   private static JobMetricsHolder jobMetrics = JobMetricsHolder.getInstance();
   private static final Function1<SparkSession, SparkContext> sparkContextFromSession =

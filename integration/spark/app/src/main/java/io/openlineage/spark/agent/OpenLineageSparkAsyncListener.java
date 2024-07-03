@@ -16,6 +16,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.spark.SparkConf;
+import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerApplicationEnd;
 import org.apache.spark.scheduler.SparkListenerEvent;
 import org.apache.spark.scheduler.SparkListenerJobEnd;
@@ -36,7 +37,7 @@ import org.apache.spark.scheduler.SparkListenerJobStart;
  * particularly when the lineage connector is really backlogged.
  */
 @Slf4j
-public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
+public class OpenLineageSparkAsyncListener extends SparkListener {
   private SparkConf sparkConf;
   private BlockingQueue<Runnable> eventQueue;
   private ExecutorService eventProcessingExecutor;
@@ -46,6 +47,7 @@ public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
   private final AtomicLong dropped = new AtomicLong();
   private final AtomicLong timedOut = new AtomicLong();
   private final AtomicLong failed = new AtomicLong();
+  private OpenLineageSparkListener syncListener;
 
   public OpenLineageSparkAsyncListener(SparkConf sparkConf) {
     log.info("Initializing OpenLineageAsyncListener with sparkConf = " + sparkConf.toDebugString());
@@ -64,6 +66,7 @@ public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
     eventProcessingExecutor =
         new ThreadPoolExecutor(
             threadCount, threadCount, 60L, TimeUnit.SECONDS, eventQueue, factory);
+    syncListener = new OpenLineageSparkListener();
     log.info(
         "Initialized async listener with threads={}, queueSize={}, timeout={} shutdownWait={}",
         queueSize,
@@ -80,6 +83,7 @@ public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
   public OpenLineageSparkAsyncListener(SparkConf conf, ExecutorService executorService) {
     this.eventProcessingExecutor = executorService;
     this.sparkConf = conf;
+    syncListener = new OpenLineageSparkListener();
   }
 
   @Override
@@ -100,7 +104,7 @@ public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
     }
     // Once pending tasks are complete/conceled, process this end event synchronously
     try {
-      super.onApplicationEnd(applicationEnd);
+      syncListener.onApplicationEnd(applicationEnd);
     } finally {
       log.info(
           "Openlineage async stats: dropped={}, timeout={}, queueDepth={}, failed={}",
@@ -115,7 +119,7 @@ public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
   public final void onOtherEvent(SparkListenerEvent event) {
     try {
       eventProcessingExecutor
-          .submit(() -> super.onOtherEvent(event))
+          .submit(() -> syncListener.onOtherEvent(event))
           .get(timeoutSeconds, TimeUnit.SECONDS);
     } catch (RejectedExecutionException re) {
       dropped.incrementAndGet();
@@ -137,7 +141,7 @@ public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
   public final void onJobStart(SparkListenerJobStart jobStart) {
     try {
       eventProcessingExecutor
-          .submit(() -> super.onJobStart(jobStart))
+          .submit(() -> syncListener.onJobStart(jobStart))
           .get(timeoutSeconds, TimeUnit.SECONDS);
     } catch (RejectedExecutionException re) {
       dropped.incrementAndGet();
@@ -159,7 +163,7 @@ public class OpenLineageSparkAsyncListener extends OpenLineageSparkListener {
   public final void onJobEnd(SparkListenerJobEnd jobEnd) {
     try {
       eventProcessingExecutor
-          .submit(() -> super.onJobEnd(jobEnd))
+          .submit(() -> syncListener.onJobEnd(jobEnd))
           .get(timeoutSeconds, TimeUnit.SECONDS);
     } catch (RejectedExecutionException re) {
       dropped.incrementAndGet();
